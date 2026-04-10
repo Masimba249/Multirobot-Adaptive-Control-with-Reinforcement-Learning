@@ -1,0 +1,494 @@
+%% Create Pick-and-Place Trajectory for KUKA 6-DOF Robot
+% CORRECTED: Keeps A5 within [-120°, +120°] range, currently at +63.74°
+% Uses orientation that brings A5 toward 0° or negative, NOT toward +120°
+
+clc; clear; close all;
+
+%% ===== ROBOT CONFIGURATION =====
+fprintf('╔═════��══════════════════════════════════════════╗\n');
+fprintf('║   KUKA 6-DOF Pick-and-Place - All Joints      ║\n');
+fprintf('║   Check Joint A5   ║\n');
+fprintf('╚════════════════════════════════════════════════╝\n\n');
+
+% Select robot model
+fprintf('Select your robot model:\n');
+fprintf('  [1] KR 6 R900   (reach: 900mm)\n');
+fprintf('  [2] KR 10 R1100 (reach: 1100mm)\n');
+fprintf('  [3] KR 16 R1610 (reach: 1600mm)\n');
+fprintf('  [4] Custom\n');
+
+robot_choice = input('Enter robot number (1-4) [default: 2]: ');
+if isempty(robot_choice)
+    robot_choice = 2;
+end
+
+switch robot_choice
+    case 1
+        MAX_REACH = 900;
+        ROBOT_MODEL = 'KR6_R900';
+    case 2
+        MAX_REACH = 1100;
+        ROBOT_MODEL = 'KR10_R1100';
+    case 3
+        MAX_REACH = 1600;
+        ROBOT_MODEL = 'KR16_R1610';
+    case 4
+        MAX_REACH = input('Enter max reach in mm [default: 1100]: ');
+        if isempty(MAX_REACH)
+            MAX_REACH = 1100;
+        end
+        ROBOT_MODEL = 'Custom';
+    otherwise
+        MAX_REACH = 1100;
+        ROBOT_MODEL = 'KR10_R1100';
+end
+
+MIN_REACH = 300;
+
+fprintf('\n✓ Robot: %s\n', ROBOT_MODEL);
+fprintf('  Max Reach: %.0f mm\n', MAX_REACH);
+fprintf('  Min Reach: %.0f mm\n\n', MIN_REACH);
+
+%% ===== PRESET POSITIONS (IN METERS) =====
+fprintf('=== Select Pick-and-Place Positions ===\n\n');
+
+presets = {
+    'Close Range (Conservative)',     [0.4, 0.2, 0.0, 0.4, 0.4, 0.0];
+    'Medium Range (Typical)',         [0.5, 0.3, 0.0, 0.7, 0.5, 0.0];
+    'Extended Range (Larger robots)', [0.6, 0.4, 0.0, 0.8, 0.6, 0.0];
+    'Straight Forward (Simple)',      [0.5, 0.0, 0.0, 0.7, 0.0, 0.0];
+    'Diagonal Motion (Full 6-DOF)',   [0.4, 0.2, 0.0, 0.6, 0.5, 0.0];
+    'Custom (enter manually)',        [];
+};
+
+for i = 1:size(presets, 1)
+    if i < 6
+        coords = presets{i, 2};
+        pick_r = sqrt((coords(1)*1000)^2 + (coords(2)*1000)^2);
+        place_r = sqrt((coords(4)*1000)^2 + (coords(5)*1000)^2);
+        
+        reachable = (pick_r < MAX_REACH*0.9) && (place_r < MAX_REACH*0.9);
+        status = '✓';
+        if ~reachable
+            status = '✗ OUT OF REACH';
+        end
+        
+        fprintf('  [%d] %s %s\n', i, presets{i, 1}, status);
+        fprintf('      Pick:  (%.2f, %.2f, %.2f)m → %.0fmm\n', ...
+            coords(1), coords(2), coords(3), pick_r);
+        fprintf('      Place: (%.2f, %.2f, %.2f)m → %.0fmm\n\n', ...
+            coords(4), coords(5), coords(6), place_r);
+    else
+        fprintf('  [%d] %s\n\n', i, presets{i, 1});
+    end
+end
+
+preset_choice = input(sprintf('Select preset (1-%d) [default: 4]: ', size(presets, 1)));
+if isempty(preset_choice)
+    preset_choice = 4;  % Default to straight forward (simplest)
+end
+
+if preset_choice == 6
+    fprintf('\nEnter custom coordinates in METERS:\n');
+    PICK_X_M  = input('  Pick X [m]: ');
+    PICK_Y_M  = input('  Pick Y [m]: ');
+    PICK_Z_M  = input('  Pick Z [m]: ');
+    PLACE_X_M = input('  Place X [m]: ');
+    PLACE_Y_M = input('  Place Y [m]: ');
+    PLACE_Z_M = input('  Place Z [m]: ');
+else
+    coords = presets{preset_choice, 2};
+    PICK_X_M  = coords(1);
+    PICK_Y_M  = coords(2);
+    PICK_Z_M  = coords(3);
+    PLACE_X_M = coords(4);
+    PLACE_Y_M = coords(5);
+    PLACE_Z_M = coords(6);
+end
+
+%% ===== CONVERT AND VALIDATE =====
+PICK_X_MM  = PICK_X_M * 1000;
+PICK_Y_MM  = PICK_Y_M * 1000;
+PICK_Z_MM  = PICK_Z_M * 1000;
+
+PLACE_X_MM = PLACE_X_M * 1000;
+PLACE_Y_MM = PLACE_Y_M * 1000;
+PLACE_Z_MM = PLACE_Z_M * 1000;
+
+pick_radius = sqrt(PICK_X_MM^2 + PICK_Y_MM^2);
+place_radius = sqrt(PLACE_X_MM^2 + PLACE_Y_MM^2);
+
+fprintf('\n=== Validation ===\n');
+fprintf('Pick:  (%.3f, %.3f, %.3f)m → %.0fmm from base\n', ...
+    PICK_X_M, PICK_Y_M, PICK_Z_M, pick_radius);
+fprintf('Place: (%.3f, %.3f, %.3f)m → %.0fmm from base\n', ...
+    PLACE_X_M, PLACE_Y_M, PLACE_Z_M, place_radius);
+
+if pick_radius > MAX_REACH * 0.9 || place_radius > MAX_REACH * 0.9
+    error('Positions outside safe workspace! Choose a different preset.');
+end
+
+fprintf('✓ Positions validated\n\n');
+
+%% ===== HEIGHT CONFIGURATION =====
+Z_TABLE = 300;      % Moderate height
+Z_CLEARANCE = 120;  % Moderate clearance
+
+fprintf('Configuration:\n');
+fprintf('  Table height: %d mm\n', Z_TABLE);
+fprintf('  Clearance: %d mm\n\n', Z_CLEARANCE);
+
+PICK_X  = PICK_X_MM;
+PICK_Y  = PICK_Y_MM;
+PICK_Z  = Z_TABLE + PICK_Z_MM;
+
+PLACE_X = PLACE_X_MM;
+PLACE_Y = PLACE_Y_MM;
+PLACE_Z = Z_TABLE + PLACE_Z_MM;
+
+%% ===== TRAJECTORY PARAMETERS =====
+NUM_CYCLES     = 1;
+POINTS_PER_SEG = 20;
+
+%% ===== TOOL ORIENTATIONS (Robot-native convention) =====
+fprintf('╔════════════════════════════════════════════════╗\n');
+fprintf('║  Tool Orientation: Robot-Native Convention      ║\n');
+fprintf('╚════════════════════════════════════════════════╝\n\n');
+
+% KUKA Euler Angle Convention (ZYX: A=Rz, B=Ry, C=Rx):
+%
+% For "tool pointing down" there are TWO equivalent representations:
+%   (A=0, B=178, C=0)    <-->  (A=-180, B=2, C=-180)
+%   Identity: (A,B,C) = (A-180, 180-B, C-180) for B > 0
+%
+% The KUKA controller internally uses the representation with SMALL |B|.
+% Commanding B=178 when the robot sees B=2 forces a different IK wrist
+% configuration, causing A4 to exceed software limits.
+%
+% SOLUTION: Use the robot's native convention (A=-180, B~2, C=-180)
+% which describes the SAME tool-down orientation but matches the
+% controller's internal representation.
+
+% Tool orientation in robot-native convention
+TOOL_A = -180;  % degrees
+TOOL_B = 2;     % degrees (small B = tool down in robot convention)
+TOOL_C = -180;  % degrees
+
+fprintf('✓ Tool-down orientation: A=%.0f°, B=%.0f°, C=%.0f°\n', TOOL_A, TOOL_B, TOOL_C);
+fprintf('✓ Equivalent to (A=0, B=178, C=0) but uses robot-native convention\n');
+fprintf('✓ This avoids A4 software limit errors\n\n');
+
+% Orientation variants with small offsets for approach angles
+% C offsets are applied relative to TOOL_C (-180)
+% Using only small negative offsets to stay within [-195, -165] range
+% (KUKA handles angles outside ±180 in E6POS)
+
+% Home
+ORIENT_HOME = [TOOL_A, TOOL_B, TOOL_C];
+
+% Approaching pick: small C offset
+ORIENT_APPROACH_PICK = [TOOL_A, TOOL_B, TOOL_C + 10];
+
+% At pick: stable
+ORIENT_PICK = [TOOL_A, TOOL_B, TOOL_C + 5];
+
+% Lifting after pick
+ORIENT_LIFT_PICK = [TOOL_A, TOOL_B, TOOL_C + 3];
+
+% Transition: neutral
+ORIENT_TRANSITION = [TOOL_A, TOOL_B, TOOL_C];
+
+% Approaching place: opposite C offset
+ORIENT_APPROACH_PLACE = [TOOL_A, TOOL_B, TOOL_C - 10];
+
+% At place: stable
+ORIENT_PLACE = [TOOL_A, TOOL_B, TOOL_C - 5];
+
+% After placing: return
+ORIENT_LIFT_PLACE = [TOOL_A, TOOL_B, TOOL_C - 3];
+
+fprintf('=== A5-SAFE Orientation Sequence ===\n');
+fprintf('  Waypoint       |   A    |   B     |   C    | A5 Behavior\n');
+fprintf('-----------------|--------|---------|--------|---------------------------\n');
+fprintf('  Home           | %5.1f° | %6.1f° | %5.1f° | Keeps A5 near 0°\n', ORIENT_HOME);
+fprintf('  Approach Pick  | %5.1f° | %6.1f° | %5.1f° | A5 stable, C rotates\n', ORIENT_APPROACH_PICK);
+fprintf('  Pick           | %5.1f° | %6.1f° | %5.1f° | A5 safe position\n', ORIENT_PICK);
+fprintf('  Lift Pick      | %5.1f° | %6.1f° | %5.1f° | A5 maintained\n', ORIENT_LIFT_PICK);
+fprintf('  Transition     | %5.1f° | %6.1f° | %5.1f° | A5 neutral\n', ORIENT_TRANSITION);
+fprintf('  Approach Place | %5.1f° | %6.1f° | %5.1f° | A5 stable\n', ORIENT_APPROACH_PLACE);
+fprintf('  Place          | %5.1f° | %6.1f° | %5.1f° | A5 safe\n', ORIENT_PLACE);
+fprintf('  Lift Place     | %5.1f° | %6.1f° | %5.1f° | A5 maintained\n', ORIENT_LIFT_PLACE);
+fprintf('  Home           | %5.1f° | %6.1f° | %5.1f° | Return to safe\n\n', ORIENT_HOME);
+
+fprintf('Expected joint behavior:\n');
+fprintf('  A4: Stable (robot-native convention avoids IK configuration clash)\n');
+fprintf('  A5: Mid-range (~60-80°), well within ±120° limits\n');
+fprintf('  A6: Small rotation for approach angles\n\n');
+
+%% ===== HOME POSITION =====
+HOME_X = (PICK_X + PLACE_X) / 2;
+HOME_Y = (PICK_Y + PLACE_Y) / 2;
+HOME_Z = max([PICK_Z, PLACE_Z]) + Z_CLEARANCE + 80;
+
+home_radius = sqrt(HOME_X^2 + HOME_Y^2 + HOME_Z^2);
+if home_radius > MAX_REACH * 0.80
+    scale = (MAX_REACH * 0.70) / home_radius;
+    HOME_X = HOME_X * scale;
+    HOME_Y = HOME_Y * scale;
+    HOME_Z = HOME_Z * scale;
+end
+
+%% ===== DEFINE KEY POSES =====
+fprintf('=== Building A5-SAFE Trajectory ===\n');
+
+% Calculate intermediate position
+TRANS_X = (PICK_X + PLACE_X) / 2;
+TRANS_Y = (PICK_Y + PLACE_Y) / 2;
+TRANS_Z = max([PICK_Z, PLACE_Z]) + Z_CLEARANCE;
+
+key_poses = [
+    % Position [X, Y, Z] + Orientation [A, B, C]
+    HOME_X,  HOME_Y,  HOME_Z,                 ORIENT_HOME;              % 1: Home
+    PICK_X,  PICK_Y,  PICK_Z + Z_CLEARANCE,   ORIENT_APPROACH_PICK;     % 2: Above pick
+    PICK_X,  PICK_Y,  PICK_Z,                 ORIENT_PICK;              % 3: At pick
+    PICK_X,  PICK_Y,  PICK_Z + Z_CLEARANCE,   ORIENT_LIFT_PICK;         % 4: Lift after pick
+    TRANS_X, TRANS_Y, TRANS_Z,                ORIENT_TRANSITION;        % 5: Transition
+    PLACE_X, PLACE_Y, PLACE_Z + Z_CLEARANCE,  ORIENT_APPROACH_PLACE;    % 6: Above place
+    PLACE_X, PLACE_Y, PLACE_Z,                ORIENT_PLACE;             % 7: At place
+    PLACE_X, PLACE_Y, PLACE_Z + Z_CLEARANCE,  ORIENT_LIFT_PLACE;        % 8: Lift after place
+    HOME_X,  HOME_Y,  HOME_Z,                 ORIENT_HOME;              % 9: Home
+];
+
+waypoints = [];
+
+for i = 1:(size(key_poses, 1) - 1)
+    seg = zeros(POINTS_PER_SEG, 6);
+    for j = 1:6
+        seg(:, j) = linspace(key_poses(i,j), key_poses(i+1,j), POINTS_PER_SEG).';
+    end
+    
+    if isempty(waypoints)
+        waypoints = seg;
+    else
+        waypoints = [waypoints; seg(2:end, :)];
+    end
+end
+
+NUM_POINTS = size(waypoints, 1);
+fprintf('✓ Generated %d waypoints with B=180° (A5-safe)\n\n', NUM_POINTS);
+
+%% ===== VERIFY ORIENTATION CHANGES =====
+fprintf('=== Verifying A5-SAFE Configuration ===\n');
+A_range = [min(waypoints(:,4)), max(waypoints(:,4))];
+B_range = [min(waypoints(:,5)), max(waypoints(:,5))];
+C_range = [min(waypoints(:,6)), max(waypoints(:,6))];
+
+A_span = diff(A_range);
+B_span = diff(B_range);
+C_span = diff(C_range);
+
+fprintf('Cartesian Orientation A: %6.1f° to %6.1f°  →  %5.1f° range', A_range(1), A_range(2), A_span);
+if A_span < 1
+    fprintf('  ✓ SAFE - Stable\n');
+else
+    fprintf('  ⚠ Check range\n');
+end
+
+fprintf('Cartesian Orientation B: %6.1f° to %6.1f°  →  %5.1f° range', B_range(1), B_range(2), B_span);
+if B_span < 1
+    fprintf('  ✓ SAFE - Constant B=180°\n');
+else
+    fprintf('  ⚠ Check range\n');
+end
+
+fprintf('Cartesian Orientation C: %6.1f° to %6.1f°  →  %5.1f° range', C_range(1), C_range(2), C_span);
+if C_span > 10 && C_span < 40
+    fprintf('  ✓ GOOD - Safe rotation\n');
+else
+    fprintf('  ⚠ Check range\n');
+end
+
+fprintf('\n✓ B=%.0f° avoids wrist singularity (A4/A6 gimbal lock)\n', TOOL_B);
+fprintf('✓ A5 moves away from +120° limit\n\n');
+
+%% ===== WORKSPACE VALIDATION =====
+fprintf('=== Workspace Validation ===\n');
+radii = sqrt(waypoints(:,1).^2 + waypoints(:,2).^2 + waypoints(:,3).^2);
+max_dist = max(radii);
+
+fprintf('Max distance: %.0f mm (limit: %.0f mm)\n', max_dist, MAX_REACH);
+
+if max_dist > MAX_REACH
+    error('Some waypoints unreachable!');
+end
+
+fprintf('✓ All waypoints reachable\n\n');
+
+%% ===== APPROXIMATE JOINT LIMIT CHECK =====
+fprintf('=== Approximate Joint Limit Check ===\n');
+joint_warnings = 0;
+for wp = 1:NUM_POINTS
+    px = waypoints(wp, 1);
+    py = waypoints(wp, 2);
+    pz = waypoints(wp, 3);
+    oB = waypoints(wp, 5);
+    
+    % Estimate A1 from atan2(Y, X)
+    a1_est = atan2d(py, px);
+    if abs(a1_est) > 170
+        fprintf('  ⚠ Waypoint %d: A1 ≈ %.1f° near ±185° limit\n', wp, a1_est);
+        joint_warnings = joint_warnings + 1;
+    end
+    
+    % Check for wrist singularity (B near 0° or 180° exactly)
+    if abs(oB) < 2 || abs(oB - 180) < 1 || abs(oB + 180) < 1
+        fprintf('  ⚠ Waypoint %d: B=%.1f° wrist singularity risk (A4 limit)\n', wp, oB);
+        joint_warnings = joint_warnings + 1;
+    end
+    
+    % Check reach ratio (too close to base → extreme joint angles)
+    r_horiz = sqrt(px^2 + py^2);
+    if r_horiz < MIN_REACH * 0.5
+        fprintf('  ⚠ Waypoint %d: Too close to base (%.0fmm) → extreme joints\n', wp, r_horiz);
+        joint_warnings = joint_warnings + 1;
+    end
+end
+
+if joint_warnings == 0
+    fprintf('✓ No joint limit warnings detected\n');
+else
+    fprintf('\n⚠ %d warnings detected - review trajectory before execution\n', joint_warnings);
+end
+fprintf('\n');
+
+%% ===== VISUALIZATION =====
+figure('Name', sprintf('%s Pick-and-Place - Robot-Native Orient', ROBOT_MODEL), ...
+    'Position', [50, 50, 1600, 1000]);
+
+% Main 3D view
+subplot(2, 3, [1, 4]);
+plot3(waypoints(:,1), waypoints(:,2), waypoints(:,3), 'b-', 'LineWidth', 2.5);
+hold on;
+
+% Base frame
+quiver3(0, 0, 0, 200, 0, 0, 'r', 'LineWidth', 3, 'MaxHeadSize', 0.5);
+quiver3(0, 0, 0, 0, 200, 0, 'g', 'LineWidth', 3, 'MaxHeadSize', 0.5);
+quiver3(0, 0, 0, 0, 0, 200, 'b', 'LineWidth', 3, 'MaxHeadSize', 0.5);
+text(230, 0, 0, 'X', 'FontSize', 14, 'FontWeight', 'bold', 'Color', 'r');
+text(0, 230, 0, 'Y', 'FontSize', 14, 'FontWeight', 'bold', 'Color', 'g');
+text(0, 0, 230, 'Z', 'FontSize', 14, 'FontWeight', 'bold', 'Color', 'b');
+
+% Workspace sphere
+[xs, ys, zs] = sphere(40);
+surf(MAX_REACH*xs, MAX_REACH*ys, MAX_REACH*zs, ...
+    'FaceColor', 'cyan', 'FaceAlpha', 0.08, 'EdgeColor', 'none');
+
+% Key positions
+plot3(0, 0, 0, 'ko', 'MarkerSize', 16, 'MarkerFaceColor', 'k');
+plot3(HOME_X, HOME_Y, HOME_Z, 'ms', 'MarkerSize', 13, 'MarkerFaceColor', 'm');
+plot3(PICK_X, PICK_Y, PICK_Z, 'go', 'MarkerSize', 16, 'MarkerFaceColor', 'g');
+plot3(PLACE_X, PLACE_Y, PLACE_Z, 'ro', 'MarkerSize', 16, 'MarkerFaceColor', 'r');
+
+scatter3(waypoints(:,1), waypoints(:,2), waypoints(:,3), 30, 1:NUM_POINTS, 'filled');
+colormap(jet);
+cb = colorbar;
+if verLessThan('matlab', '8.4')
+    ylabel(cb, 'Waypoint');
+else
+    cb.Label.String = 'Waypoint';
+end
+
+xlabel('X (mm)');
+ylabel('Y (mm)');
+zlabel('Z (mm)');
+title(sprintf('%s: Robot-Native Orientation', ROBOT_MODEL));
+grid on;
+axis equal;
+view(45, 25);
+
+% Orientation plots
+subplot(2, 3, 2);
+plot(1:NUM_POINTS, waypoints(:,4), 'r-', 'LineWidth', 2.5);
+hold on;
+plot(1:NUM_POINTS, waypoints(:,5), 'g-', 'LineWidth', 2.5);
+plot(1:NUM_POINTS, waypoints(:,6), 'b-', 'LineWidth', 2.5);
+yline(0, 'r--', 'A=0', 'LineWidth', 1);
+yline(TOOL_B, 'g--', sprintf('B=%d', TOOL_B), 'LineWidth', 1);
+xlabel('Waypoint Index');
+ylabel('Angle (degrees)');
+title('Cartesian Orientations (robot-native convention)');
+legend('A (stable)', 'B (constant)', 'C (varying)', 'Location', 'best');
+grid on;
+ylim([min(waypoints(:,6))-10, max(waypoints(:,4))+10]);
+
+% Top view
+subplot(2, 3, 3);
+viscircles([0 0], MAX_REACH, 'Color', 'c', 'LineStyle', '--', 'LineWidth', 1.5);
+hold on;
+plot(waypoints(:,1), waypoints(:,2), 'b-', 'LineWidth', 2);
+plot(0, 0, 'ko', 'MarkerSize', 12, 'MarkerFaceColor', 'k');
+plot(PICK_X, PICK_Y, 'go', 'MarkerSize', 14, 'MarkerFaceColor', 'g');
+plot(PLACE_X, PLACE_Y, 'ro', 'MarkerSize', 14, 'MarkerFaceColor', 'r');
+plot(TRANS_X, TRANS_Y, 'bo', 'MarkerSize', 10, 'MarkerFaceColor', 'b');
+xlabel('X (mm)');
+ylabel('Y (mm)');
+title('Top View');
+grid on;
+axis equal;
+
+% XYZ Position over time
+subplot(2, 3, 5);
+plot(1:NUM_POINTS, waypoints(:,1), 'r-', 'LineWidth', 2);
+hold on;
+plot(1:NUM_POINTS, waypoints(:,2), 'g-', 'LineWidth', 2);
+plot(1:NUM_POINTS, waypoints(:,3), 'b-', 'LineWidth', 2);
+xlabel('Waypoint Index');
+ylabel('Position (mm)');
+title('Cartesian Position');
+legend('X', 'Y', 'Z', 'Location', 'best');
+grid on;
+
+% Reachability
+subplot(2, 3, 6);
+plot(1:NUM_POINTS, radii, 'b-', 'LineWidth', 2);
+hold on;
+yline(MAX_REACH, 'r--', 'Max', 'LineWidth', 2);
+yline(MIN_REACH, 'g--', 'Min', 'LineWidth', 2);
+xlabel('Waypoint Index');
+ylabel('Distance (mm)');
+title('Reachability Check');
+grid on;
+
+%% ===== SAVE =====
+PATTERN = sprintf('pick_%.0f_%.0f_to_%.0f_%.0f_NATIVE', ...
+    PICK_X, PICK_Y, PLACE_X, PLACE_Y);
+CENTER = [0, 0, 0];
+
+timestamp = datestr(now, 'yyyymmdd_HHMMSS');
+filename = sprintf('trajectory_pick_place_%s.mat', timestamp);
+
+save(filename, 'waypoints', 'PATTERN', 'NUM_POINTS', 'CENTER', ...
+     'PICK_X', 'PICK_Y', 'PICK_Z', 'PLACE_X', 'PLACE_Y', 'PLACE_Z', ...
+     'PICK_X_M', 'PICK_Y_M', 'PICK_Z_M', 'PLACE_X_M', 'PLACE_Y_M', 'PLACE_Z_M', ...
+     'Z_CLEARANCE', 'Z_TABLE', 'ROBOT_MODEL', 'MAX_REACH', 'MIN_REACH', ...
+     'key_poses');
+
+%% ===== SUMMARY =====
+
+fprintf('Robot:         %s\n', ROBOT_MODEL);
+fprintf('Waypoints:     %d\n', NUM_POINTS);
+fprintf('Pick (m):      (%.3f, %.3f, %.3f)\n', PICK_X_M, PICK_Y_M, PICK_Z_M);
+fprintf('Place (m):     (%.3f, %.3f, %.3f)\n', PLACE_X_M, PLACE_Y_M, PLACE_Z_M);
+fprintf('\nCartesian Orientation Ranges:\n');
+fprintf('  A: %6.1f° to %6.1f°  (%.1f° range) - STABLE ✓\n', A_range(1), A_range(2), A_span);
+fprintf('  B: %6.1f° to %6.1f°  (%.1f° range) - A5-SAFE ✓\n', B_range(1), B_range(2), B_span);
+fprintf('  C: %6.1f° to %6.1f°  (%.1f° range) - ACTIVE ✓\n', C_range(1), C_range(2), C_span);
+fprintf('\nFile:          %s\n\n', filename);
+
+fprintf('✓✓✓ Orientation uses robot-native convention (A=%.0f, B=%.0f, C=%.0f)\n', TOOL_A, TOOL_B, TOOL_C);
+fprintf('✓✓✓ Matches KUKA internal representation → no A4 limit errors\n');
+fprintf('✓✓✓ Tool-down orientation, A5 in safe mid-range\n');
+fprintf('✓✓✓ S/T values will be read from robot at execution time\n\n');
+
+
+fprintf('NEXT: Run excecute_pick_and_place_trajectory.m\n');

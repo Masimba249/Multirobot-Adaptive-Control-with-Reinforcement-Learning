@@ -1,0 +1,565 @@
+%% DUAL ROARM COORDINATED PAINTING - PATH PLANNING ALGORITHM
+% Paints a 500mm x 400mm x 400mm object located 300mm from robot base
+% Two robots coordinate to paint the entire surface
+% Uses WiFi/HTTP control with real-time telemetry
+%
+% COORDINATE SYSTEM:
+%   X: Forward (away from robot base) - OBJECT IS HERE
+%   Y: Left/Right (robot's perspective)
+%   Z: Up/Down (0 = table level, positive = above table)
+%
+% PAINTING STRATEGY: HORIZONTAL STRIPES (left-to-right movement)
+% Object Position: 300mm forward from base, sitting on table
+% Object Dimensions: 500mm (width Y) x 400mm (height Z) x 400mm (depth X)
+
+clc; clear; close all; format short;
+
+%% ===================== 1) CONFIGURATION =======================
+% Robot Network Settings
+ARM1_IP  = "192.168.1.192";
+ARM2_IP  = "192.168.1.101";
+BASE_URL = "/js?json=";
+
+HTTP_SEND_TIMEOUT = 2.5;
+HTTP_READ_TIMEOUT = 0.6;
+poll_interval     = 0.15;
+MAX_SEND_RETRIES  = 2;
+SEND_RETRY_DELAY  = 0.20;
+
+% Table and Robot Base Height
+TABLE_HEIGHT = 0;           % Table at Z=0 (robot base reference)
+ROBOT_BASE_HEIGHT = 0;      % Robot sits on table at Z=0
+
+% Object Parameters (all in mm)
+OBJECT_X_START = 300;       % Object starts 300mm forward from robot base
+OBJECT_WIDTH_Y = 500;       % Width (left-right, Y-axis)
+OBJECT_HEIGHT_Z = 400;      % Height (vertical, Z-axis)
+OBJECT_DEPTH_X = 400;       % Depth (forward, X-axis)
+
+% Object sits on table, so its Z range is:
+OBJECT_Z_MIN = TABLE_HEIGHT;              % Bottom of object = table level
+OBJECT_Z_MAX = TABLE_HEIGHT + OBJECT_HEIGHT_Z;  % Top of object = 400mm above table
+
+% Painting Parameters
+STRIPE_HEIGHT   = 40;       % Height of each horizontal painting stripe (mm)
+STRIPE_OVERLAP  = 10;       % Overlap between stripes (mm)
+PAINT_SPEED     = 0.2;      % Movement speed during painting
+STANDOFF_DIST   = 80;       % Distance from surface while painting (mm)
+APPROACH_DIST   = 150;      % Side approach distance (mm)
+
+% Work Division - Split object in Y direction (left/right)
+% Each robot paints FULL HEIGHT but only their half of width
+ARM1_Y_RANGE = [-OBJECT_WIDTH_Y/2, 0];     % Left half (negative Y)
+ARM2_Y_RANGE = [0, OBJECT_WIDTH_Y/2];      % Right half (positive Y)
+
+disp('========================================');
+disp(' HORIZONTAL PAINTING STRATEGY ');
+disp('========================================');
+fprintf('Robot Base: Z = %.0f mm\n', ROBOT_BASE_HEIGHT);
+fprintf('Table Level: Z = %.0f mm\n', TABLE_HEIGHT);
+fprintf('Object X Range: %.0f to %.0f mm (forward from base)\n', OBJECT_X_START, OBJECT_X_START + OBJECT_DEPTH_X);
+fprintf('Object Y Range: %.0f to %.0f mm (left-right)\n', -OBJECT_WIDTH_Y/2, OBJECT_WIDTH_Y/2);
+fprintf('Object Z Range: %.0f to %.0f mm (vertical, above table)\n', OBJECT_Z_MIN, OBJECT_Z_MAX);
+fprintf('\nARM 1: Left half (Y: %.0f to %.0f mm)\n', ARM1_Y_RANGE(1), ARM1_Y_RANGE(2));
+fprintf('ARM 2: Right half (Y: %.0f to %.0f mm)\n', ARM2_Y_RANGE(1), ARM2_Y_RANGE(2));
+disp(' ');
+
+%% ===================== 2) INITIALIZE TELEMETRY PLOTS =======================
+fig = figure('Name','Dual Arm Painting Telemetry','Color','w',...
+             'Position',[120 80 1400 800]);
+
+t0 = tic;
+
+% Arm 1 XYZ Position
+subplot(2,3,1);
+h1x = animatedline('LineWidth',1.5,'Color','r','DisplayName','X'); hold on;
+h1y = animatedline('LineWidth',1.5,'Color','g','DisplayName','Y');
+h1z = animatedline('LineWidth',1.5,'Color','b','DisplayName','Z');
+title('ARM 1 Position (mm)'); grid on; ylabel('mm'); legend('Location','best');
+xlim([0 10]); % Will auto-expand
+
+% Arm 2 XYZ Position
+subplot(2,3,2);
+h2x = animatedline('LineWidth',1.5,'Color','r','DisplayName','X'); hold on;
+h2y = animatedline('LineWidth',1.5,'Color','g','DisplayName','Y');
+h2z = animatedline('LineWidth',1.5,'Color','b','DisplayName','Z');
+title('ARM 2 Position (mm)'); grid on; ylabel('mm'); legend('Location','best');
+xlim([0 10]); % Will auto-expand
+
+% 3D Visualization of painting path
+subplot(2,3,3);
+h3d_arm1 = animatedline('LineWidth',2,'Color',[0 0.4 0.8],'DisplayName','ARM 1 Path'); hold on;
+h3d_arm2 = animatedline('LineWidth',2,'Color',[0.8 0.4 0],'DisplayName','ARM 2 Path');
+xlabel('X (mm) - Forward'); ylabel('Y (mm) - Left/Right'); zlabel('Z (mm) - Up');
+title('3D Painting Paths'); grid on; legend; view(45, 30);
+
+% Draw table plane
+[tableX, tableY] = meshgrid([0 800], [-400 400]);
+tableZ = zeros(size(tableX));
+surf(tableX, tableY, tableZ, 'FaceAlpha', 0.1, 'EdgeColor', 'none', 'FaceColor', [0.8 0.8 0.8]);
+
+% Draw object
+drawObject(OBJECT_X_START, OBJECT_WIDTH_Y, OBJECT_HEIGHT_Z, OBJECT_DEPTH_X, TABLE_HEIGHT);
+axis equal;
+
+% Arm 1 Load
+subplot(2,3,4);
+h1L = animatedline('LineWidth',1.5,'DisplayName','Load','Color','m'); 
+title('ARM 1 Load/Torque'); grid on; ylabel('Load'); xlabel('Time (s)');
+legend; xlim([0 10]);
+
+% Arm 2 Load
+subplot(2,3,5);
+h2L = animatedline('LineWidth',1.5,'DisplayName','Load','Color','m'); 
+title('ARM 2 Load/Torque'); grid on; ylabel('Load'); xlabel('Time (s)');
+legend; xlim([0 10]);
+
+% Progress indicator
+subplot(2,3,6);
+hProgress = bar([0 0]);
+set(gca,'XTickLabel',{'ARM 1','ARM 2'});
+ylabel('Progress (%)'); title('Painting Progress');
+ylim([0 100]); grid on;
+
+drawnow;
+
+%% ===================== 3) GENERATE PAINTING PATHS =======================
+disp('========================================');
+disp(' Generating HORIZONTAL Painting Paths ');
+disp('========================================');
+disp(' ');
+
+% Generate HORIZONTAL stripe paths for FRONT FACE
+[path1_front, path2_front] = generateFrontFaceHorizontal(OBJECT_X_START, OBJECT_WIDTH_Y, ...
+    OBJECT_HEIGHT_Z, STRIPE_HEIGHT, STRIPE_OVERLAP, STANDOFF_DIST, ...
+    ARM1_Y_RANGE, ARM2_Y_RANGE, APPROACH_DIST, TABLE_HEIGHT);
+
+% Generate paths for TOP FACE
+[path1_top, path2_top] = generateTopFaceHorizontal(OBJECT_X_START, OBJECT_WIDTH_Y, ...
+    OBJECT_DEPTH_X, STRIPE_HEIGHT, STRIPE_OVERLAP, STANDOFF_DIST, ...
+    ARM1_Y_RANGE, ARM2_Y_RANGE, APPROACH_DIST, OBJECT_Z_MAX);
+
+% Generate paths for side faces
+[path1_left, path2_right] = generateSideFacesHorizontal(OBJECT_X_START, OBJECT_WIDTH_Y, ...
+    OBJECT_HEIGHT_Z, OBJECT_DEPTH_X, STRIPE_HEIGHT, STRIPE_OVERLAP, STANDOFF_DIST, ...
+    APPROACH_DIST, TABLE_HEIGHT);
+
+disp(['ARM 1 waypoints (front): ' num2str(size(path1_front,1))]);
+disp(['ARM 2 waypoints (front): ' num2str(size(path2_front,1))]);
+disp(['ARM 1 waypoints (top): ' num2str(size(path1_top,1))]);
+disp(['ARM 2 waypoints (top): ' num2str(size(path2_top,1))]);
+disp(['ARM 1 waypoints (left side): ' num2str(size(path1_left,1))]);
+disp(['ARM 2 waypoints (right side): ' num2str(size(path2_right,1))]);
+disp(' ');
+
+%% ===================== 4) HOME BOTH ARMS =======================
+disp('Homing both arms...');
+send_json_command(ARM1_IP, BASE_URL, '{"T":100}', HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY);
+send_json_command(ARM2_IP, BASE_URL, '{"T":100}', HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY);
+pause(2.0);
+monitorTelemetryBoth(3.0, ARM1_IP, ARM2_IP, t0, poll_interval, HTTP_READ_TIMEOUT, ...
+    h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L);
+
+%% ===================== 5) EXECUTE PAINTING - FRONT FACE =======================
+disp('========================================');
+disp(' PAINTING FRONT FACE (HORIZONTAL) ');
+disp('========================================');
+
+executePaintingPath(ARM1_IP, path1_front, 'ARM 1 (Left Half - Front)', ...
+    BASE_URL, HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY, ...
+    ARM2_IP, t0, poll_interval, HTTP_READ_TIMEOUT, ...
+    h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L, h3d_arm1, hProgress, 1, PAINT_SPEED);
+
+executePaintingPath(ARM2_IP, path2_front, 'ARM 2 (Right Half - Front)', ...
+    BASE_URL, HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY, ...
+    ARM1_IP, t0, poll_interval, HTTP_READ_TIMEOUT, ...
+    h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L, h3d_arm2, hProgress, 2, PAINT_SPEED);
+
+%% ===================== 6) EXECUTE PAINTING - TOP FACE =======================
+disp('========================================');
+disp(' PAINTING TOP FACE (HORIZONTAL) ');
+disp('========================================');
+
+executePaintingPath(ARM1_IP, path1_top, 'ARM 1 (Left Half - Top)', ...
+    BASE_URL, HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY, ...
+    ARM2_IP, t0, poll_interval, HTTP_READ_TIMEOUT, ...
+    h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L, h3d_arm1, hProgress, 1, PAINT_SPEED);
+
+executePaintingPath(ARM2_IP, path2_top, 'ARM 2 (Right Half - Top)', ...
+    BASE_URL, HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY, ...
+    ARM1_IP, t0, poll_interval, HTTP_READ_TIMEOUT, ...
+    h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L, h3d_arm2, hProgress, 2, PAINT_SPEED);
+
+%% ===================== 7) EXECUTE PAINTING - SIDE FACES =======================
+disp('========================================');
+disp(' PAINTING SIDE FACES (HORIZONTAL) ');
+disp('========================================');
+
+executePaintingPath(ARM1_IP, path1_left, 'ARM 1 (Left Side)', ...
+    BASE_URL, HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY, ...
+    ARM2_IP, t0, poll_interval, HTTP_READ_TIMEOUT, ...
+    h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L, h3d_arm1, hProgress, 1, PAINT_SPEED);
+
+executePaintingPath(ARM2_IP, path2_right, 'ARM 2 (Right Side)', ...
+    BASE_URL, HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY, ...
+    ARM1_IP, t0, poll_interval, HTTP_READ_TIMEOUT, ...
+    h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L, h3d_arm2, hProgress, 2, PAINT_SPEED);
+
+%% ===================== 8) RETURN HOME =======================
+disp(' ');
+disp('Painting complete! Returning to home...');
+send_json_command(ARM1_IP, BASE_URL, '{"T":100}', HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY);
+send_json_command(ARM2_IP, BASE_URL, '{"T":100}', HTTP_SEND_TIMEOUT, MAX_SEND_RETRIES, SEND_RETRY_DELAY);
+monitorTelemetryBoth(3.0, ARM1_IP, ARM2_IP, t0, poll_interval, HTTP_READ_TIMEOUT, ...
+    h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L);
+
+disp('========================================');
+disp(' PAINTING OPERATION COMPLETE ');
+disp('========================================');
+
+
+%% ===================== LOCAL FUNCTIONS =================================
+
+function [path1, path2] = generateFrontFaceHorizontal(objXStart, width, height, ...
+    stripeHeight, overlap, standoff, arm1Range, arm2Range, approachDist, tableHeight)
+    % Generates HORIZONTAL stripe paths for FRONT FACE
+    % Paints LEFT-TO-RIGHT at each height level
+    % X = constant (front face), Y varies (left-right), Z = constant per stripe
+    
+    effectiveStripe = stripeHeight - overlap;
+    xFrontFace = objXStart - standoff;  % Stand off distance from front face
+    
+    % Calculate number of horizontal stripes needed
+    numStripes = ceil(height / effectiveStripe);
+    
+    % ARM 1 path (paints LEFT HALF: negative Y to zero)
+    path1 = [];
+    
+    for i = 1:numStripes
+        % Height for this stripe (start from bottom, work up)
+        zPos = tableHeight + 30 + (i-1) * effectiveStripe;  % Start 30mm above table
+        if zPos > tableHeight + height - 20, zPos = tableHeight + height - 20; end
+        
+        yLeft = arm1Range(1);      % Start at far left
+        yRight = arm1Range(2);     % End at center
+        
+        % Approach point (from left side)
+        path1 = [path1; xFrontFace, yLeft - approachDist, zPos, 0];
+        
+        % Start point (left edge)
+        path1 = [path1; xFrontFace, yLeft, zPos, 0];
+        
+        % End point (center)
+        path1 = [path1; xFrontFace, yRight, zPos, 0];
+        
+        % Departure point (to center)
+        path1 = [path1; xFrontFace, yRight + approachDist/2, zPos, 0];
+    end
+    
+    % ARM 2 path (paints RIGHT HALF: zero to positive Y)
+    path2 = [];
+    
+    for i = 1:numStripes
+        zPos = tableHeight + 30 + (i-1) * effectiveStripe;
+        if zPos > tableHeight + height - 20, zPos = tableHeight + height - 20; end
+        
+        yLeft = arm2Range(1);      % Start at center
+        yRight = arm2Range(2);     % End at far right
+        
+        % Approach point (from center)
+        path2 = [path2; xFrontFace, yLeft - approachDist/2, zPos, 0];
+        
+        % Start point (center)
+        path2 = [path2; xFrontFace, yLeft, zPos, 0];
+        
+        % End point (right edge)
+        path2 = [path2; xFrontFace, yRight, zPos, 0];
+        
+        % Departure point (to right side)
+        path2 = [path2; xFrontFace, yRight + approachDist, zPos, 0];
+    end
+end
+
+function [path1, path2] = generateTopFaceHorizontal(objXStart, width, depth, ...
+    stripeHeight, overlap, standoff, arm1Range, arm2Range, approachDist, objectZTop)
+    % Generates HORIZONTAL paths for TOP FACE
+    % Paints LEFT-TO-RIGHT, moving forward (increasing X)
+    % X varies (front to back), Y varies (left-right split), Z = constant (top)
+    
+    effectiveStripe = stripeHeight - overlap;
+    zTopFace = objectZTop + standoff;  % Paint from above
+    
+    % Calculate number of stripes (along X depth)
+    numStripes = ceil(depth / effectiveStripe);
+    
+    % ARM 1 path (left half)
+    path1 = [];
+    
+    for i = 1:numStripes
+        xPos = objXStart + (i-1) * effectiveStripe;
+        if xPos > objXStart + depth, xPos = objXStart + depth; end
+        
+        yLeft = arm1Range(1);
+        yRight = arm1Range(2);
+        
+        % Approach, paint left-to-right, departure
+        path1 = [path1; xPos, yLeft - approachDist, zTopFace, 0];
+        path1 = [path1; xPos, yLeft, zTopFace, 0];
+        path1 = [path1; xPos, yRight, zTopFace, 0];
+        path1 = [path1; xPos, yRight + approachDist/2, zTopFace, 0];
+    end
+    
+    % ARM 2 path (right half)
+    path2 = [];
+    
+    for i = 1:numStripes
+        xPos = objXStart + (i-1) * effectiveStripe;
+        if xPos > objXStart + depth, xPos = objXStart + depth; end
+        
+        yLeft = arm2Range(1);
+        yRight = arm2Range(2);
+        
+        % Approach, paint left-to-right, departure
+        path2 = [path2; xPos, yLeft - approachDist/2, zTopFace, 0];
+        path2 = [path2; xPos, yLeft, zTopFace, 0];
+        path2 = [path2; xPos, yRight, zTopFace, 0];
+        path2 = [path2; xPos, yRight + approachDist, zTopFace, 0];
+    end
+end
+
+function [pathLeft, pathRight] = generateSideFacesHorizontal(objXStart, width, ...
+    height, depth, stripeHeight, overlap, standoff, approachDist, tableHeight)
+    % Generates HORIZONTAL paths for LEFT and RIGHT side faces
+    
+    effectiveStripe = stripeHeight - overlap;
+    numStripes = ceil(height / effectiveStripe);
+    
+    % LEFT SIDE (ARM 1): Paints FRONT-TO-BACK at each height
+    pathLeft = [];
+    yLeftSide = -width/2 - standoff;
+    
+    for i = 1:numStripes
+        zPos = tableHeight + 30 + (i-1) * effectiveStripe;
+        if zPos > tableHeight + height - 20, zPos = tableHeight + height - 20; end
+        
+        xFront = objXStart;
+        xBack = objXStart + depth;
+        
+        pathLeft = [pathLeft; xFront - approachDist, yLeftSide, zPos, 0];
+        pathLeft = [pathLeft; xFront, yLeftSide, zPos, 0];
+        pathLeft = [pathLeft; xBack, yLeftSide, zPos, 0];
+        pathLeft = [pathLeft; xBack + approachDist/2, yLeftSide, zPos, 0];
+    end
+    
+    % RIGHT SIDE (ARM 2): Paints FRONT-TO-BACK at each height
+    pathRight = [];
+    yRightSide = width/2 + standoff;
+    
+    for i = 1:numStripes
+        zPos = tableHeight + 30 + (i-1) * effectiveStripe;
+        if zPos > tableHeight + height - 20, zPos = tableHeight + height - 20; end
+        
+        xFront = objXStart;
+        xBack = objXStart + depth;
+        
+        pathRight = [pathRight; xFront - approachDist, yRightSide, zPos, 0];
+        pathRight = [pathRight; xFront, yRightSide, zPos, 0];
+        pathRight = [pathRight; xBack, yRightSide, zPos, 0];
+        pathRight = [pathRight; xBack + approachDist/2, yRightSide, zPos, 0];
+    end
+end
+
+function executePaintingPath(robotIP, path, robotName, baseURL, ...
+    sendTimeout, maxRetries, retryDelay, otherRobotIP, t0, pollInterval, ...
+    readTimeout, h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L, h3dLine, hProgress, ...
+    armIdx, paintSpeed)
+    % Executes painting path for one robot with BOTH arms' telemetry
+    
+    disp(['Executing ' robotName ' painting path...']);
+    numPoints = size(path, 1);
+    
+    for i = 1:numPoints
+        x = path(i,1);
+        y = path(i,2);
+        z = path(i,3);
+        t = path(i,4);
+        
+        % Create move command (T=104: Cartesian move)
+        cmdStr = sprintf('{"T":104,"x":%d,"y":%d,"z":%d,"t":%d,"spd":%.2f}', ...
+            round(x), round(y), round(z), round(t), paintSpeed);
+        
+        send_json_command(robotIP, baseURL, cmdStr, sendTimeout, maxRetries, retryDelay);
+        
+        % Update 3D path visualization
+        addpoints(h3dLine, x, y, z);
+        
+        % Monitor BOTH robots' telemetry
+        monitorTelemetryBoth(0.5, robotIP, otherRobotIP, t0, pollInterval, ...
+            readTimeout, h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L);
+        
+        % Update progress
+        progress = (i / numPoints) * 100;
+        currentData = get(hProgress, 'YData');
+        if armIdx == 1
+            set(hProgress, 'YData', [progress currentData(2)]);
+        else
+            set(hProgress, 'YData', [currentData(1) progress]);
+        end
+        drawnow;
+        
+        % Progress indicator
+        if mod(i, 5) == 0
+            fprintf('  %s: %.1f%% (X=%.0f, Y=%.0f, Z=%.0f)\n', ...
+                robotName, progress, x, y, z);
+        end
+    end
+    
+    disp([robotName ' path complete!']);
+end
+
+function drawObject(xStart, widthY, heightZ, depthX, tableHeight)
+    % Draws 3D outline of object sitting on table
+    
+    x1 = xStart;               % Front face
+    x2 = xStart + depthX;      % Back face
+    y1 = -widthY/2;            % Left side
+    y2 = widthY/2;             % Right side
+    z1 = tableHeight;          % Bottom (on table)
+    z2 = tableHeight + heightZ; % Top
+    
+    % Draw front face (RED - closest to robot)
+    plot3([x1 x1 x1 x1 x1], [y1 y2 y2 y1 y1], [z1 z1 z2 z2 z1], ...
+        'r-', 'LineWidth', 3);
+    
+    % Draw back face
+    plot3([x2 x2 x2 x2 x2], [y1 y2 y2 y1 y1], [z1 z1 z2 z2 z1], ...
+        'k--', 'LineWidth', 2);
+    
+    % Connect front to back
+    plot3([x1 x2], [y1 y1], [z1 z1], 'k--', 'LineWidth', 2);
+    plot3([x1 x2], [y2 y2], [z1 z1], 'k--', 'LineWidth', 2);
+    plot3([x1 x2], [y1 y1], [z2 z2], 'k--', 'LineWidth', 2);
+    plot3([x1 x2], [y2 y2], [z2 z2], 'k--', 'LineWidth', 2);
+    
+    % Draw center dividing line (ARM 1 vs ARM 2)
+    plot3([x1 x2], [0 0], [z1 z2], 'g--', 'LineWidth', 2);
+    
+    % Labels
+    text(x1, 0, z2+50, 'FRONT FACE', 'FontSize', 10, 'FontWeight', 'bold', 'Color', 'r');
+    text(x1+depthX/2, y1-50, z2/2, 'ARM 1', 'FontSize', 10, 'FontWeight', 'bold', 'Color', [0 0.4 0.8]);
+    text(x1+depthX/2, y2+50, z2/2, 'ARM 2', 'FontSize', 10, 'FontWeight', 'bold', 'Color', [0.8 0.4 0]);
+end
+
+function response = send_json_command(ip, base_url, json_cmd, timeout_s, maxRetries, retryDelay)
+    if nargin < 5 || isempty(maxRetries)
+        maxRetries = 1;
+    end
+    if nargin < 6 || isempty(retryDelay)
+        retryDelay = 0.15;
+    end
+
+    url = ['http://' char(ip) char(base_url) urlencode(json_cmd)];
+    response = '';
+
+    for attempt = 1:maxRetries
+        try
+            response = webread(url, weboptions('Timeout', timeout_s));
+            return;
+        catch ME
+            if attempt < maxRetries
+                pause(retryDelay);
+            else
+                warning('HTTP send failed to %s after %d attempts', char(ip), maxRetries);
+            end
+        end
+    end
+end
+
+function data = get_robot_status(ip, timeout_s)
+    cmd = struct('T', 105);
+    url = ['http://' char(ip) '/js?json=' urlencode(jsonencode(cmd))];
+    data = [];
+    try
+        resp = webread(url, weboptions('Timeout', timeout_s));
+        start_idx = strfind(resp, '{');
+        end_idx   = strfind(resp, '}');
+        if ~isempty(start_idx) && ~isempty(end_idx)
+            json_str = resp(start_idx(1):end_idx(end));
+            data = jsondecode(json_str);
+        else
+            data = jsondecode(resp);
+        end
+    catch
+        % Silently fail - telemetry polling can fail occasionally
+    end
+end
+
+function [x,y,z,loadVal] = extractTelemetry(status)
+    x = firstExisting(status, {'x','X','px','posx'});
+    y = firstExisting(status, {'y','Y','py','posy'});
+    z = firstExisting(status, {'z','Z','pz','posz'});
+    
+    lb = firstExisting(status, {'lb','load_b','torq_b'});
+    ls = firstExisting(status, {'ls','load_s','torq_s'});
+    le = firstExisting(status, {'le','load_e','torq_e'});
+    lh = firstExisting(status, {'lh','load_h','torq_h'});
+    sumLoads = lb + ls + le + lh;
+    
+    single = firstExisting(status, {'l','load','torq','tq','current','i'});
+    
+    if sumLoads ~= 0
+        loadVal = sumLoads;
+    else
+        loadVal = single;
+    end
+end
+
+function v = firstExisting(s, names)
+    v = 0;
+    if isempty(s) || ~isstruct(s), return; end
+    for k = 1:numel(names)
+        if isfield(s, names{k})
+            try
+                v = double(s.(names{k}));
+                return;
+            catch
+                v = 0;
+            end
+        end
+    end
+end
+
+function monitorTelemetryBoth(secondsToRun, ARM1_IP, ARM2_IP, t0, poll_interval, ...
+    HTTP_READ_TIMEOUT, h1x, h1y, h1z, h1L, h2x, h2y, h2z, h2L)
+    % Monitor BOTH robots simultaneously and update BOTH graphs
+    
+    tStart = tic;
+    while toc(tStart) < secondsToRun
+        % Query BOTH robots
+        s1 = get_robot_status(ARM1_IP, HTTP_READ_TIMEOUT);
+        s2 = get_robot_status(ARM2_IP, HTTP_READ_TIMEOUT);
+
+        tNow = toc(t0);
+
+        % Update ARM 1 graphs
+        if ~isempty(s1)
+            [x1,y1,z1,L1] = extractTelemetry(s1);
+            addpoints(h1x, tNow, x1); 
+            addpoints(h1y, tNow, y1); 
+            addpoints(h1z, tNow, z1);
+            addpoints(h1L, tNow, L1);
+        end
+
+        % Update ARM 2 graphs
+        if ~isempty(s2)
+            [x2,y2,z2,L2] = extractTelemetry(s2);
+            addpoints(h2x, tNow, x2); 
+            addpoints(h2y, tNow, y2); 
+            addpoints(h2z, tNow, z2);
+            addpoints(h2L, tNow, L2);
+        end
+
+        drawnow limitrate;
+        pause(poll_interval);
+    end
+end
