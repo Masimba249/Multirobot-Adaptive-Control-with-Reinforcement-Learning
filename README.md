@@ -8,9 +8,9 @@
 
 ## 🎬 Demo
 
-Watch the system in action with the project demo video. GitHub will show a file preview when you click the link below.
+![Demo](demo.gif)
 
-[▶️ View Demo Video](Demo%20Video.mp4)
+*Full-quality recording: [Demo.mp4](Demo.mp4).*
 
 ---
 
