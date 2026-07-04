@@ -6,6 +6,15 @@
 
 > **Coordinated control of a KUKA KR10 industrial robot and two RoArm-M2-S painting arms using deep reinforcement learning for adaptive pick-and-place, spray painting, and real-time collision avoidance.**
 
+## 🎬 Demo
+
+Watch the system in action with the embedded project demo video.
+
+<video controls width="720">
+  <source src="Demo Video.mp4" type="video/mp4">
+  Your browser does not support HTML5 video. You can also download the video directly: [Demo Video](Demo Video.mp4)
+</video>
+
 ---
 
 ## 📋 Table of Contents
@@ -40,6 +49,8 @@ The key insight is that **collision avoidance must be trained on data from robot
 ---
 
 ## System Architecture
+
+![System Architecture](System_Architecture.png)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -312,7 +323,25 @@ The system optionally interfaces with a **Siemens S7-1500 PLC** via OPC-UA for r
 PLC_OPC_UA_Launcher    % Launch OPC-UA connection and write robot data
 ```
 
+The PLC is paired with an HMI control panel for operator input and status display:
+
+![HMI Control and Display](HMI Control and Display.png)
+
 Data written to PLC includes robot positions, velocities, and collision flags, enabling hardware safety interlocks independent of the MATLAB controller.
+
+---
+
+## MATLAB Simulink Integration
+
+The MATLAB pipeline uses a Simulink-based integration layer to coordinate KUKA, RoArm, and PLC interfaces in a single execution flow.
+
+- `run.m` initializes the MATLAB environment and launches the Simulink control model.
+- The Simulink model reads robot commands and sensor inputs, dispatches HTTP/TCP messages to RoArm and KUKA, and forwards status to the PLC.
+- This tight integration keeps motion planning, RL agent execution, and safety monitoring synchronized in real time.
+
+![MATLAB Simulink Integration](MatLab Integration.png)
+
+The figure above shows the Simulink architecture, including the supervisor block, robot dispatch logic, and separate GUI launchers for RoArm paint and KUKA pick-and-place.
 
 ---
 
