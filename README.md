@@ -8,12 +8,9 @@
 
 ## 🎬 Demo
 
-Watch the system in action with the embedded project demo video.
+Watch the system in action with the project demo video. GitHub will show a file preview when you click the link below.
 
-<video controls width="720">
-  <source src="Demo Video.mp4" type="video/mp4">
-  Your browser does not support HTML5 video. You can also download the video directly: [Demo Video](Demo Video.mp4)
-</video>
+[▶️ View Demo Video](Demo%20Video.mp4)
 
 ---
 
@@ -325,7 +322,7 @@ PLC_OPC_UA_Launcher    % Launch OPC-UA connection and write robot data
 
 The PLC is paired with an HMI control panel for operator input and status display:
 
-![HMI Control and Display](HMI Control and Display.png)
+![HMI Control and Display](HMI%20Control%20and%20Display.png)
 
 Data written to PLC includes robot positions, velocities, and collision flags, enabling hardware safety interlocks independent of the MATLAB controller.
 
@@ -339,7 +336,7 @@ The MATLAB pipeline uses a Simulink-based integration layer to coordinate KUKA, 
 - The Simulink model reads robot commands and sensor inputs, dispatches HTTP/TCP messages to RoArm and KUKA, and forwards status to the PLC.
 - This tight integration keeps motion planning, RL agent execution, and safety monitoring synchronized in real time.
 
-![MATLAB Simulink Integration](MatLab Integration.png)
+![MATLAB Simulink Integration](MatLab%20Integration.png)
 
 The figure above shows the Simulink architecture, including the supervisor block, robot dispatch logic, and separate GUI launchers for RoArm paint and KUKA pick-and-place.
 
